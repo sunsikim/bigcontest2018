@@ -5,13 +5,13 @@ author: "Chill-ddaeng"
 
 ```{r basic_setting}
 source("settings.R") # Any predefined functions are stored in this file
-raw_data <- read.csv("rawdata.csv", header = T)
+raw_data <- read.csv("rawdata.csv", header = T) # Data containing 17,076 x 32 cells
 ```
 
 # 1. Data preprocessing
 Summarized in generate_eda function and submitted ppt.
 ```{r obtain_preprocessed_data}
-eda <- generate_eda()
+generate_eda() # preprocessed data 'eda' is being stored in the global environment
 ```
 
 # 2. Justification of the process
@@ -28,7 +28,7 @@ cluster_pam <- foreach(i = 3:17, .combine = list, .multicombine = T, .packages =
   pam(dist_matrix, i, diss = T)              # PAM cluster the customer types(varying the number of clusters from 3 to 17)
 }
 stopImplicitCluster()
-rm('distance_matrix')
+rm('dist_matrix')
 ```
 
 ```{r generate_and_attach_ID}
@@ -37,7 +37,7 @@ cluster_key <- as.data.frame(matrix(0, nrow = nrow(custinfotype), ncol = length(
 for (i in 1:ncol(cluster_key)) cluster_key[,i] <- factor(cluster_pam[[i]]$clustering)
 names(cluster_key) <- paste0('k', 3:17)
 cluster_key$id     <- factor(id_info)
-rm('id_info')
+rm('id_info', 'cluster_pam')
 ```
 
 ## 3-2. Assign posterior probability
@@ -50,11 +50,100 @@ for(i in 1:ncluster) custinfotypes[[i]] <- custinfotype %>% filter(clust_num == 
 
 ```{r calculate_posterior_and_assign_cluster}
 library(readxl)
+# 1_Data Set.xlsx : 141,750 x 32 cells where 141,750 x 24 cells are missing
 answersheet  <- as.data.frame(read_xlsx('1_Data Set.xlsx', 2)) %>% select_at(2:9)
-# Assign specific value to NA since every missing value is also a valid category of each variable.
+# Assign specific value to missing basic customer information since they are also valid category of each variable.
 answersheet[is.na(answersheet$DOUBLE_IN),]$DOUBLE_IN <- 3
 answersheet[is.na(answersheet$NUMCHILD),]$NUMCHILD   <- 4
 answersheet[is.na(answersheet$MARRY_Y),]$MARRY_Y     <- 3
 answersheet  <- answersheet %>% mutate_all(as.factor)
-answer_clust <- group_assigner(answersheet,custinfotypes,custinfotype)
+
+# Assign groups to every 141,750 customer type based on posterior probabilities P(K = i|X = x)
+answer_clust <- group_assigner(answersheet, custinfotypes, custinfotype) # returns the vector with length of 141,750
+```
+
+# 4. Bayesian estimation on financial information using Gibbs Sampling
+
+## 4-1. Discretizing continuous variables
+```{r storing_continous_values_by_cluster}
+generate_eda()
+continous_index <- which(sapply(eda, is.numeric))
+eda_clustered   <- clust_assigner(eda, ncluster)
+edas_interval   <- vector("list", ncluster)
+for (i in 1:ncluster) {
+  edas_interval[[i]] <- eda_clustered %>% 
+    filter(clust_num == i) %>% 
+    select(-clust_num) %>% 
+    select_at(continous_index)
+}
+rm('continuous_index')
+```
+
+```{r discretize_them}
+registerDoParallel(detectCores() - 1)
+ninterval <- 2 # i.e. Bisection
+breaks <- foreach(i = 1:ncluster, .combine=list, .multicombine=TRUE, .packages = 'bnlearn') %dopar% {
+  discretize(edas_interval[[i]], method = "hartemink", breaks = ninterval, ibreaks=100, idisc='interval')
+}
+rm('edas_interval')
+stopImplicitCluster()
+```
+
+```{r store_the_bisection_point_of_each_variable_of_each_cluster}
+cutpoint_list       <- vector("list", ncluster)
+for (i in 1:ncluster) {
+  cutpoints         <- as.data.frame(matrix(0, nrow = length(breaks[[i]]), ncol = ninterval))
+  names(cutpoints)  <- c('varname', paste('cutpoint', 1:(ninterval - 1)))
+  cutpoints$varname <- names(breaks[[i]])
+  for (j in 1:length(breaks[[i]])) {
+    cutstring <- unlist(strsplit(levels(breaks[[i]][, j]), ','))[2 * (2:ninterval) - 1]
+    cutpoints[j, 2:ninterval] <- as.numeric(stringr::str_sub(cutstring, 2, -1))
+  }
+  cutpoint_list[[i]] <- cutpoints
+}
+rm('cutstring', 'cutpoints', 'i', 'j')
+```
+
+```{r revalue_the_continuous_variable_of_each_data}
+edas <- edas_discretized <- vector("list", ncluster)
+for (i in 1:ncluster) edas[[i]] <- eda_clustered %>% filter(clust_num == i)
+for (i in 1:ncluster) edas_discretized[[i]] <- data_transform(edas, i, cutpoint_list)
+```
+
+## 4-2. Searching conditional independence using Bayesian Network
+```{r use_discretized_data_to_fit_BN}
+registerDoParallel(detectCores() - 1)
+arcs_boot <- foreach(i = 1:ncluster, .combine = list, .multicombine = T, .packages = 'bnlearn') %dopar% {
+  boot.strength(edas_discretized[[i]], R = 2000, algorithm = 'hc', algorithm.args = list(score='bde', iss = 5))
+} # Create 2000 graphs from 2000 bootstrapped data
+network_cluster_full <- foreach(i = 1:ncluster, .combine = list, .multicombine = T, .packages = 'bnlearn') %dopar% {
+  averaged.network(arcs_boot[[i]],threshold = 0.85)
+} # Obtain averaged graph from that 2000 graphs
+stopImplicitCluster()
+```
+
+## 4-3. Gibbs Sampling
+```{r obtain_gibbs_samples}
+gibbs_list <- vector("list", ncluster)
+for (cluster in 1:ncluster) {
+  gibbs_list[[cluster]] <- boot_gibbs_sampling(cluster, network_cluster_full, cutpoint_list, edas, edas_discretized, answersheet, boot_n = 300)
+}
+```
+
+# 5. Validation
+Summarized in submitted ppt.
+
+# 6. Searching surplus variable using Markov Blanket of fitted Bayesian Network
+```{r surplus_search}
+iamnotsurplus <- c()
+for (i in 1:length(network_cluster_full)) {
+  for (j in 9:length(eda)) {
+    if (sum(mb(network_cluster_full[[i]], names(eda)[j]) %in% names(eda)[1:8])!=0) {
+      iamindex <- mb(network_cluster_full[[i]], names(eda)[j]) %in% names(eda)[1:8]
+      iamnotsurplus <- c(iamnotsurplus, mb(network_cluster_full[[i]], names(eda)[j])[iamindex])
+    }
+  }
+}
+iamnotsurplus <- unique(iamnotsurplus)
+names(eda)[1:8][which(!names(eda)[1:8] %in% iamnotsurplus)] # Returns NUMCHILD; implies that NUMCHILD is surplus variable
 ```
