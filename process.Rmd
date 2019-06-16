@@ -1,0 +1,60 @@
+---
+title: "Data analysis procedure"
+author: "Chill-ddaeng"
+---
+
+```{r basic_setting}
+source("settings.R") # Any predefined functions are stored in this file
+raw_data <- read.csv("rawdata.csv", header = T)
+```
+
+# 1. Data preprocessing
+Summarized in generate_eda function and submitted ppt.
+```{r obtain_preprocessed_data}
+eda <- generate_eda()
+```
+
+# 2. Justification of the process
+Summarized in submitted ppt.
+
+# 3. Clustering based on posterior probability P(K = i|X)
+
+## 3-1. PAM cluster the customer type
+```{r PAM_the_customer_type}
+custinfotype <- as.custinfotype(eda, F)      # Condense the data into 5084 customer type
+dist_matrix  <- daisy(custinfotype, 'gower') # Calculate gower distance between customer types
+registerDoParallel(detectCores() - 1)        # Register the parallel computing
+cluster_pam <- foreach(i = 3:17, .combine = list, .multicombine = T, .packages = 'cluster') %dopar% {
+  pam(dist_matrix, i, diss = T)              # PAM cluster the customer types(varying the number of clusters from 3 to 17)
+}
+stopImplicitCluster()
+rm('distance_matrix')
+```
+
+```{r generate_and_attach_ID}
+id_info     <- keyassigner(custinfotype)
+cluster_key <- as.data.frame(matrix(0, nrow = nrow(custinfotype), ncol = length(cluster_pam)))
+for (i in 1:ncol(cluster_key)) cluster_key[,i] <- factor(cluster_pam[[i]]$clustering)
+names(cluster_key) <- paste0('k', 3:17)
+cluster_key$id     <- factor(id_info)
+rm('id_info')
+```
+
+## 3-2. Assign posterior probability
+```{r store_data_separately}
+ncluster      <- 11
+custinfotype  <- clust_assigner(custinfotype, ncluster) # Attach cluster information to the customer type data
+custinfotypes <- list()                                 # Separately store the customer type data according to its cluster
+for(i in 1:ncluster) custinfotypes[[i]] <- custinfotype %>% filter(clust_num == i) %>% select(-clust_num)
+```
+
+```{r calculate_posterior_and_assign_cluster}
+library(readxl)
+answersheet  <- as.data.frame(read_xlsx('1_Data Set.xlsx', 2)) %>% select_at(2:9)
+# Assign specific value to NA since every missing value is also a valid category of each variable.
+answersheet[is.na(answersheet$DOUBLE_IN),]$DOUBLE_IN <- 3
+answersheet[is.na(answersheet$NUMCHILD),]$NUMCHILD   <- 4
+answersheet[is.na(answersheet$MARRY_Y),]$MARRY_Y     <- 3
+answersheet  <- answersheet %>% mutate_all(as.factor)
+answer_clust <- group_assigner(answersheet,custinfotypes,custinfotype)
+```
