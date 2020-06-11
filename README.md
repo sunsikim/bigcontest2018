@@ -61,7 +61,7 @@
 <ol>
   <li>주어진 표본의 고객유형 군집화(PAM Clustering)</li>
   <li>모든 고객유형에 군집 할당(Bayesian inference)</li>
-  <li>Gibbs Sampling을 통한 금융거래정보 추정
+  <li>MCMC를 통한 금융거래정보 추정
     <ol>
       <li>군집별 고객정보의 결합확률분포 내의 조건부독립 관계 탐색(Bayesian Network)</li>
       <li>Kernel Density Estimation을 통해 얻은 조건부 분포를 사용한 샘플 생성(Acceptance-Rejection sampling)</li>
